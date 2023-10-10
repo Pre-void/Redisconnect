@@ -572,27 +572,31 @@ public:
         }
 
         int getResult(RedisConnect * redis,int timeout){
+            /**lambda函数，执行redis命令**/
             auto doWork = [&](){
+                /**toString获取redis命令**/
                 string msg = toString();
+                /**获取socket连接**/
                 Socket & sock = redis->sock;
-
+                /**将命令字符串 msg 写入到与 Redis 服务器的socket连接中，如果写入失败（返回值小于 0），则返回 NETERR，表示网络错误。**/
                 if (sock.write(msg.c_str(),msg.length()) < 0) return NETERR;
 
-                int len = 0;
-                int delay = 0;
-                int readed = 0;
-                char * dest = redis->buffer;
+                int len = 0;           /**用于存储读取的数据长度**/
+                int delay = 0;         /**用于记录超时时间**/
+                int readed = 0;        /**用于记录已读取的数据长度**/
+                char * dest = redis->buffer;  /**用于存储接收的数据**/
                 const int maxsz = redis->memsz;
-
+                /**确保没有读取超出指定最大长度的数据**/
                 while (readed < maxsz){
+                    /**从连接中读取数据，并将读取的数据存储到 dest 缓冲区中**/
                     if ((len = sock.read(dest+readed,maxsz- readed, false)) < 0) return len;
-
+                    /**表示暂时没有数据可读,增加 delay，若delay > timeout。说明超时，返回 TIMEOUT 表示响应超时**/
                     if (len == 0){
                         delay +=  SOCKET_TIMEOUT;
                         if (delay > timeout) return TIMEOUT;
                     } else{
                         dest[readed += len] = 0;
-
+                        /**将读取到的数据传递给 parse 函数来解析响应数据。如果 parse 函数返回 TIMEOUT，表示需要继续等待更多数据。**/
                         if ((len = parse(dest,readed)) == TIMEOUT){
                             delay = 0;
                         } else{
@@ -605,6 +609,7 @@ public:
             status = 0;
             msg.clear();
             redis->code = doWork();
+            /**redis->code 小于 0说明出问题了  cmd.msg会在dowork中的parse里修改**/
             if (redis->code < 0 && msg.empty()){
                 switch (redis->code) {
                     case SYSERR:
@@ -701,7 +706,9 @@ public:
         args... 表示将多个参数打包成一个参数包。**/
     template<class DATA_TYPE,class ...ARGS>
     int execute(DATA_TYPE val,ARGS ...args){
+        /**初始化一个Command对象**/
         Command cmd;
+        /**将参数不断地放入cmd对象中的vec中["set","name","lzh111111"]**/
         cmd.add(val,args...);
 
         return cmd.getResult(this,timeout);
@@ -759,9 +766,10 @@ public:
     int hlen(const string & key){
         return execute("hlen",key) == OK ? status : code;
     }
-
+    /**密码登录**/
     int auth(const string & passwd){
         this->passwd = passwd;
+        /**空密码就说明没有密码，登录成功**/
         if (passwd.empty()) return OK;
         return execute("auth",passwd);
     }
@@ -954,6 +962,7 @@ public:
         return eval(lua,key,getLockId()) > 0 && status == OK;
     }
 
+    /**一个键（用于标识锁）和一个超时时间（默认为30秒）作为参数**/
     bool lock(const string & key,int timeout=30){
         int delay = timeout * 1000;
         for (int i = 0; i < delay; i+=10) {
@@ -978,6 +987,14 @@ protected:
     按引用捕获指定变量：[&, y]，表示按引用捕获所有变量，但 y 会按值捕获。
     指定捕获变量并设置它们的捕获方式：[x, &y]，表示只捕获 x 和 y 两个变量，其中 x 按值捕获，y 按引用捕获。**/
     virtual shared_ptr<RedisConnect> grasp() const{
+        /**静态初始化一个连接池ResPool<RedisConnect>  由后面的lambda函数初始化。
+         * 调用的构造函数是     ResPool(function<shared_ptr<T>()> func, int maxlen = 8, int timeout = 60)
+                            {
+                                this->timeout = timeout;
+                                this->maxlen = maxlen;
+                                this->func = func;  这个形参对应的实参是lambda函数
+                            }
+         * **/
         static ResPool<RedisConnect> pool  ([&](){
             /**创建了一个名为 redis 的智能指针，指向了一个新创建的 RedisConnect 对象，并使用 make_shared 函数进行初始化。
              * make_shared 是 C++ 中用于创建智能指针的函数，它会动态分配内存来存储对象，并返回一个指向该对象的智能指针。**/
@@ -988,6 +1005,7 @@ protected:
             return redis = NULL;
         },POOL_MAXLEN);
 
+        /**获取一个redis连接**/
         shared_ptr<RedisConnect> redis = pool.get();
 
         if (redis && redis->getErrorCode()){
@@ -1012,9 +1030,13 @@ public:
     }
 
     static shared_ptr<RedisConnect> Instance(){
+        /**单例模式
+         * GetTemplete()返回的是static类型的RedisConnect对象，这里GetTemplete()返回的&redis是Setup中创建的那个**/
         return GetTemplate()->grasp();
     }
-    /**用于设置 Redis 连接库的配置信息。先调用GetTemplete()获取一个RedisConnect对象，
+    /**用于设置 Redis 连接库的配置信息。
+     * 并没有建立socket连接，建立连接是在Instance()实现的
+     * @return 先调用GetTemplete()获取一个RedisConnect对象，
      * 它接受host主机名（或 IP 地址）、port端口号、密码、超时时间和内存大小作为参数，
      * 并将这些配置信息存储在连接库的模板对象中。在 Linux 下，它还忽略了SIGPIPE信号，以避免因管道破裂而导致程序崩溃。**/
     static void Setup(const string & host,int port,const string & passwd = "",int timeout = 3000,int memsz = 2 * 1024 * 1024){
