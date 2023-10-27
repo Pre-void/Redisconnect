@@ -191,7 +191,7 @@ public:
             /**connect 函数用于在客户端套接字上发起连接到服务器端套接字的请求，建立网络连接。这个函数通常用于创建 TCP 或 UDP 客户端程序。
              * int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
                 sockfd：要连接的套接字的文件描述符。
-                addr：指向目标服务器端地址信息的指针，通常是 struct sockaddr_in 或 struct sockaddr 类型的指针。
+                addr：指向目标服务器端地址信息的指针，通常是 struct sockaddr_in 或 struct sockaddr 类型的指针。sockaddr_in通常用于ipv4
                 addrlen：addr 指向的地址结构体的大小，通常使用 sizeof(struct sockaddr_in) 来获取。
                 返回值：如果连接成功，connect 返回 0。
                        如果连接失败，它会返回 -1，并设置全局变量 errno 来指示失败的原因。
@@ -455,6 +455,10 @@ public:
 
     protected:
         int parse(const char * msg,int len){
+            /**以 $ 开头，表示它是一个批定长度的字符串。它会调用 parseNode 函数来解析字符串，
+             * 并根据解析的结果返回相应的状态码（如 OK、TIMEOUT、NOTFUND）。
+             *
+             * get命令会返回  "$9\r\nlzh111111\r\n"**/
             if (*msg == '$'){
                 const char * end = parseNode(msg,len);
 
@@ -467,14 +471,17 @@ public:
 
                 return OK;
             }
-
+            /**跳过resp协议规定的首字符如$ + - :*/
             const char * str = msg + 1;
+            /**返回"\r\n"首次出现的位置**/
             const char * end = strstr(str,"\r\n");
-
+            /**如果无法找到结束标记，返回原始的 msg，表示解析失败。**/
             if (end == NULL) return TIMEOUT;
-
+            /**如果消息以 +、- 或 : 开头，表示它是一个状态回复，通常用于表示成功、失败或状态码。
+             * 根据消息的前缀字符，它设置相应的状态码和消息内容。**/
             if (*msg == '+' || *msg == '-' || *msg == ':'){
                 this->status = OK;
+                /**截取除了首字符以及结尾的"\r\n"之间的字符串***/
                 this->msg = string(str,end);
 
                 if (*msg == '+') return OK;
@@ -485,13 +492,22 @@ public:
                 return OK;
             }
 
-            if (*msg == '*'){
-                int cnt = atoi(str);
-                const char * tail = msg +len;
-                vec.clear();
-                str = end + 2;
 
+            /**消息以 "*" 开头，表示这是一个多行回复，通常用于表示多个元素的数组。它解析数组的元素数量，然后循环处理每个元素。
+             * 每个元素都以 "$" 开头，后面跟着元素的长度。parseNode 被用来解析每个元素。解析完成后，它返回数组的长度。
+             * 一般数组元素中都是字符串，所以用parseNode解析数组内元素**/
+            if (*msg == '*'){
+                /**查看数组中有几个元素**/
+                int cnt = atoi(str);
+                /**标记 RESP 响应字符串的末尾，以确保不超出字符串的长度。**/
+                const char * tail = msg +len;
+                /**因为是数组，所以返回有多个，用vec存储**/
+                vec.clear();
+                /**移动到数组中第一个元素的位置**/
+                str = end + 2;
+                /**遍历解析数组中元素**/
                 while (cnt > 0){
+                    /**如果这个元素还是数组，递归解析**/
                     if (*str == '*') return parse(str,tail-str);
 
                     end = parseNode(str,tail- str);
@@ -505,21 +521,25 @@ public:
             }
             return DATAERR;
         }
-
+        /**用于解析 RESP 响应中的字符串节点。**/
         const char * parseNode(const char * msg , int len){
+            /**跳过resp协议规定的首字符如$ + - :*/
             const char * str = msg + 1;
             /**用于在一个字符串中查找另一个字符串，并返回第一次出现匹配的子字符串的指针。**/
             const char * end = strstr(str,"\r\n");
-
+            /**如果无法找到结束标记，返回原始的 msg，表示解析失败。**/
             if (end == NULL) return msg;
-
+            /**字符串的长度**/
             int sz = atoi(str);
-
+            /**sz 为负数时，表示它是一个引用，msg + sz 实际上是指向之前出现的元素，而不是当前元素。这样可以有效地减少数据传输时的冗余。**/
             if (sz < 0) return msg + sz;
+            /*第一个元素起始位置***/
             str = end + 2;
+            /**结束位置**/
             end = str + sz + 2;
+            /**如果 RESP 响应的长度超出了给定的数据长度 len，返回原始的 msg，表示解析失败。**/
             if (msg + len < end) return msg;
-
+            /**将成功解析的 RESP 字符串内容存入 res**/
             res.emplace_back(string(str,str + sz));
 
             return end;
@@ -553,10 +573,16 @@ public:
         }
 
     public:
+        /**toString 函数，用于将一组字符串转换为符合 Redis 协议的字符串表示形式。**/
         string toString() const{
+            /**ostringstream 对象 out，它用于构建最终的字符串表示形式。**/
             ostringstream out;
+            /**添加一个表示命令参数数量的头部，例如，如果 vec 中有3个参数，头部将是 *3\r\n。**/
             out << "*" << vec.size() << "\r\n";
-
+            /**对于 vec 中的每个字符串参数，执行以下步骤：
+                添加一个表示字符串长度的标识符，例如，如果字符串的长度是10，标识符将是 $10\r\n。
+                添加字符串的实际内容，然后添加 \r\n 表示字符串的结束。
+             **/
             for (const string & item : vec) {
                 out << "$" << item.length() << "\r\n" << item << "\r\n";
             }
@@ -574,7 +600,10 @@ public:
         int getResult(RedisConnect * redis,int timeout){
             /**lambda函数，执行redis命令**/
             auto doWork = [&](){
-                /**toString获取redis命令**/
+                /**toString获取redis命令
+                 * get命令    "*2\r\n$3\r\nget\r\n$5\r\nname2\r\n"
+                 * set命令   ""*3\r\n$3\r\nset\r\n$4\r\nname\r\n$9\r\nlzh111111\r\n""
+                 * 删除锁的命令 "*5\r\n$4\r\neval\r\n$93\r\nif redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end\r\n$1\r\n1\r\n$6\r\nlockey\r\n$26\r\n172.20.123.254:51235:51235\r\n"**/
                 string msg = toString();
                 /**获取socket连接**/
                 Socket & sock = redis->sock;
@@ -588,15 +617,17 @@ public:
                 const int maxsz = redis->memsz;
                 /**确保没有读取超出指定最大长度的数据**/
                 while (readed < maxsz){
-                    /**从连接中读取数据，并将读取的数据存储到 dest 缓冲区中**/
+                    /**从连接中读取数据，并将读取的数据存储到 dest 缓冲区中，
+                     * dest中本身是可能有数据的，read后会覆盖dest到dest+len的数据，但是dest+len+1处可能还有字符，下面的dest[readed += len] = 0;就是在len+1处添加\0符号，终止**/
                     if ((len = sock.read(dest+readed,maxsz- readed, false)) < 0) return len;
                     /**表示暂时没有数据可读,增加 delay，若delay > timeout。说明超时，返回 TIMEOUT 表示响应超时**/
                     if (len == 0){
                         delay +=  SOCKET_TIMEOUT;
                         if (delay > timeout) return TIMEOUT;
                     } else{
+                        /**终止符***/
                         dest[readed += len] = 0;
-                        /**将读取到的数据传递给 parse 函数来解析响应数据。如果 parse 函数返回 TIMEOUT，表示需要继续等待更多数据。**/
+                        /**将读取到的数据传递给 parse 函数来解析响应数据,将数据存入res中。如果 parse 函数返回 TIMEOUT，表示需要继续等待更多数据。**/
                         if ((len = parse(dest,readed)) == TIMEOUT){
                             delay = 0;
                         } else{
@@ -606,10 +637,11 @@ public:
                 }
                 return PARAMERR;
         };
+            /**重置cmd的status和msg**/
             status = 0;
             msg.clear();
             redis->code = doWork();
-            /**redis->code 小于 0说明出问题了  cmd.msg会在dowork中的parse里修改**/
+            /**redis->code 小于 0说明出问题了  若执行成功，cmd.msg不会为空，会在dowork中的parse里设置**/
             if (redis->code < 0 && msg.empty()){
                 switch (redis->code) {
                     case SYSERR:
@@ -645,9 +677,14 @@ public:
 };
 
 protected:
+    /**code 通常用来表示具体的执行结果或错误码。在 RedisConnect 类中，code 变量用于存储执行命令或操作的返回状态码，
+     * 例如成功执行时可能是 0，不同的错误情况可能对应不同的非零状态码。这个状态码可以帮助开发人员判断具体执行过程中是否出现了问题。**/
     int code = 0;   /**错误代码**/
     int port = 0;   /**redis服务器端口号**/
     int memsz = 0;  /**缓存数据的内存大小**/
+    /**status 变量通常用于表示一个更宽泛的状态或标志，它可能不是具体的数字错误码。在 RedisConnect 类中，status
+     * 变量可能表示连接状态或操作状态的标志，比如是否成功连接到 Redis 服务器、是否成功获取分布式锁等。这个状态通常是布尔值或枚举类型，
+     * 更容易理解操作的成功与否。**/
     int status = 0; /**连接状态**/
     int timeout = 0;/**超时时间**/
     char * buffer = NULL; /**数据缓冲区**/
@@ -885,38 +922,46 @@ public:
         return withsore ? execute(vec,"zrange",key,start, end,"withscores") : execute(vec,"zrange",key,start,end);
     }
 public:
+    /**这个重载用于执行 Lua 脚本，而不涉及键（KEYS）和参数（ARGV）数组。这是一个最基本的执行 Lua 脚本的方式。**/
     template<class ...ARGS>
     int eval(const string & lua){
         vector<string> vec;
         return eval(lua,vec);
     }
 
+    /**调用下面的eval
+     * 这个重载允许执行 Lua 脚本，并传递一个键（KEYS[1]）和参数（ARGV[1]）给 Lua 脚本。在这种情况下，key 是唯一的键，args 可以是零个或多个附加参数。**/
     template<class ...ARGS>
     int eval(const string & lua,const string & key,ARGS ...args){
         vector<string> vec;
         vec.emplace_back(key);
         return eval(lua,vec,args...);
     }
-
+    /**调用下面的eval
+     * 这个重载允许执行 Lua 脚本，并传递一个键数组（KEYS）以及参数（ARGV）给 Lua 脚本。这样可以传递多个键，也可以传递零个或多个附加参数。**/
     template<class ...ARGS>
     int eval(const string & lua,const vector<string> & keys,ARGS ...args){
         vector<string> vec;
         return eval(vec,lua,keys,args...);
     }
-
+    /**这个重载是最通用的，它允许传递自定义的键数组和参数到 Lua 脚本，并将执行结果存储在 vec 中。**/
     template<class ...ARGS>
     int eval(vector<string> & vec,const string & lua,const vector<string> & keys,ARGS ...args){
         int len = 0;
         Command cmd("eval");
         cmd.add(lua);
         cmd.add(len = keys.size());
+//        int len1 = cmd.vec.size();
 
         if (len-- > 0){
             for (int i = 0; i < len; ++i) {
                 cmd.add(keys[i]);
             }
+            /**之所以这么写，是因为add()没有单独添加额外参数的重载形式，
+             * 调用void add(DATA_TYPE val,ARGS ...args){**/
             cmd.add(keys.back(),args...);
         }
+//        len1 = cmd.vec.size();
 
         cmd.getResult(this,timeout);
         if (code > 0) swap(vec,cmd.res);
@@ -937,18 +982,29 @@ public:
     }
 
     const char * getLockId() {
+        /**定义了一个线程局部的字符数组id，用于存储锁的唯一标识符。
+         * 使用 thread_local 保证了锁的唯一标识符对于每个线程是独立的，避免了线程之间的竞争和冲突。**/
         thread_local char id[0xFF] = {};
         auto GetHost = []() {
             char hostname[0xFF];
+            /**获取当前主机的名称，存储在hostname中**/
             if (gethostname(hostname, sizeof(hostname)) < 0) return "unkonw host";
-
+            /**根据主机名获取主机的IP地址信息，存储在data中。通常用于进行网络编程中的主机名解析。
+             * gethostbyname() 函数返回一个 struct hostent 结构指针，其中包含了与指定主机名相关的信息，包括 IP 地址。这个结构通常包括以下字段：
+                h_name：官方主机名。                               "Present"
+                h_aliases：主机的别名列表。
+                h_addrtype：地址类型（通常为 AF_INET，表示 IPv4）。   2
+                h_length：地址的字节数。                            4
+                h_addr_list：主机的 IP 地址列表。通常，IP 地址以二进制形式表示，可以通过 inet_ntoa() 函数将其转换为字符串。
+             **/
             struct hostent *data = gethostbyname(hostname);
-
+            /**将IP地址转换为字符串格式，返回主机的IP地址。**/
             return (const char *) inet_ntoa(*(struct in_addr *) (data->h_addr_list[0]));
         };
 
         if (*id == 0){
 #ifdef LINUX
+            /**将主机名（或IP地址）、当前进程ID和当前线程ID等信息格式化成一个字符串，并将其存储在id中。这个字符串将作为锁的唯一标识符。**/
             snprintf(id, sizeof(id)-1,"%s:%ld:%ld",GetHost(),(long)getpid(),(long) syscall(SYS_gettid));
 #else
             snprintf(id, sizeof(id) - 1, "%s:%ld:%ld", GetHost(), (long)GetCurrentProcessId(), (long)GetCurrentThreadId());
@@ -956,7 +1012,26 @@ public:
         }
         return id;
     }
+    /**
+    这段代码是用来实现分布式锁的解锁操作。解锁的关键在于确保只有持有锁的客户端才能够释放锁，而其他客户端不能随意释放锁。
 
+    通过 Lua 脚本执行 Redis 命令。
+
+    redis.call 是 Redis Lua 脚本中的一个内建函数，用于调用 Redis 命令。在 Lua 脚本中，可以使用 redis.call 来执行 Redis 命令，
+     就像在普通的 Redis 命令行中执行一样。例如redis.call('get', 'mykey')。这允许你在 Lua 脚本中利用 Redis 数据存储和处理的能力。
+
+     KEYS 是 Lua 脚本中的一个特殊数组，用于表示传递给 Lua 脚本的 Redis 键。在 Redis Lua 脚本中，
+     KEYS 数组允许你引用传递给脚本的 Redis 键（key）。KEYS 数组的索引从 1 开始。
+     在这里KEYS[1] 的含义是使用传递给脚本的第一个 Redis 键，通常在解锁分布式锁的情况下，KEYS[1] 将包含用于加锁的键。通过使用 KEYS[1]，
+     你可以在 Lua 脚本中引用和操作这个键，例如检查它的值是否与你期望的值相匹配，然后执行相应的操作，例如删除该键。
+
+     ARGV 是 Lua 脚本中的另一个特殊数组，用于表示传递给 Lua 脚本的参数。与 KEYS 数组类似，ARGV 允许你引用传递给脚本的参数。
+     同样，Lua 数组的索引从 1 开始。
+     在你的 Lua 脚本中，ARGV[1] 表示使用传递给脚本的第一个参数，即数组的第一个元素。通常情况下，ARGV[1] 包含了用于解锁分布式锁的信息，
+     通常是加锁时设置的标识，以确保只有持有相同标识的客户端才能成功解锁。
+
+    通过这个 Lua 脚本，只有持有锁的客户端才能够成功解锁，其他客户端无法释放锁。这是一种非常安全且保证锁的一致性的解锁方式。
+     **/
     bool unlock(const string & key){
         const char * lua  = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
         return eval(lua,key,getLockId()) > 0 && status == OK;
@@ -964,6 +1039,7 @@ public:
 
     /**一个键（用于标识锁）和一个超时时间（默认为30秒）作为参数**/
     bool lock(const string & key,int timeout=30){
+        /**将传入的超时时间转换为毫秒**/
         int delay = timeout * 1000;
         for (int i = 0; i < delay; i+=10) {
             if (execute("set",key,getLockId(),"nx","ex",timeout) >= 0) return true;
@@ -987,6 +1063,7 @@ protected:
     按引用捕获指定变量：[&, y]，表示按引用捕获所有变量，但 y 会按值捕获。
     指定捕获变量并设置它们的捕获方式：[x, &y]，表示只捕获 x 和 y 两个变量，其中 x 按值捕获，y 按引用捕获。**/
     virtual shared_ptr<RedisConnect> grasp() const{
+
         /**静态初始化一个连接池ResPool<RedisConnect>  由后面的lambda函数初始化。
          * 调用的构造函数是     ResPool(function<shared_ptr<T>()> func, int maxlen = 8, int timeout = 60)
                             {
@@ -1010,7 +1087,7 @@ protected:
 
         if (redis && redis->getErrorCode()){
             pool.disable(redis);
-
+            /**失败就递归获取**/
             return grasp();
         }
 
@@ -1031,7 +1108,11 @@ public:
 
     static shared_ptr<RedisConnect> Instance(){
         /**单例模式
-         * GetTemplete()返回的是static类型的RedisConnect对象，这里GetTemplete()返回的&redis是Setup中创建的那个**/
+         * 确保只有一个全局唯一的RedisConnect对象存在。这个RedisConnect提供连接所需要的配置
+         * 线程池里的连接共享这个配置，不必单独为每个连接设置连接属性。
+         *
+         * GetTemplete()Instance() 返回的是一个指向 RedisConnect 对象的 shared_ptr 智能指针，
+         * 这里GetTemplete()返回的是Setup中创建的那个单例RedisConnect ，这个RedisConnect指针调用grasp()**/
         return GetTemplate()->grasp();
     }
     /**用于设置 Redis 连接库的配置信息。
@@ -1041,6 +1122,16 @@ public:
      * 并将这些配置信息存储在连接库的模板对象中。在 Linux 下，它还忽略了SIGPIPE信号，以避免因管道破裂而导致程序崩溃。**/
     static void Setup(const string & host,int port,const string & passwd = "",int timeout = 3000,int memsz = 2 * 1024 * 1024){
 #ifdef LINUX
+        /**signal()处理信号函数，第一个参数是接受的信号，第二个参数是接收到对应信号要进行的操作，这里是忽略SIGPIPE信号
+         *以下情况会触发SIGPIPE信号
+         * 1）管道和FIFO（有名管道）操作：如果你在一个管道（包括匿名管道和有名管道）上写入数据，而没有进程在读取这些数据，这将导致 SIGPIPE 信号。
+
+           2）在已经关闭的文件描述符上写：如果你试图向一个已经关闭的文件描述符（包括文件、套接字、管道等）写数据，操作系统会检测到这一情况并向进程发送 SIGPIPE 信号。
+
+           3）使用内存映射的共享内存：在一些共享内存的情况下，如果你写入一个已经分离的共享内存区域，这也会触发 SIGPIPE 信号。
+         *
+         * 在这里本项目主要处理的是第二种情况，防止向已经关闭的socket连接输入数据时直接导致程序中断的情况，会忽略这个错误
+         * **/
         signal(SIGPIPE,SIG_IGN);
 #else
         WSADATA data; WSAStartup(MAKEWORD(2, 2), &data);
